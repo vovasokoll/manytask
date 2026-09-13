@@ -163,7 +163,7 @@ def requires_auth(f: Callable[..., Any]) -> Callable[..., Any]:
             return f(*args, **kwargs)
 
         if not valid_auth_session(session):
-            logger.error("Failed to verify auth session.", exc_info=True)
+            logger.debug("Missing or invalid auth session; redirecting to signup")
             return redirect_to_login_with_bad_session()
 
         if not app.auth_api.check_user_is_authenticated(

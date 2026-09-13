@@ -1454,7 +1454,7 @@ class DataBaseApi(StorageApi):
             logger.info("Grades config sync completed for course=%s id=%s", course.name, course.id)
 
     def _check_pending_migrations(self, database_url: str) -> bool:
-        logger.debug("Checking pending migrations for database_url=%s", database_url)
+        logger.debug("Checking pending database migrations")
         alembic_cfg = Config(self.DEFAULT_ALEMBIC_PATH, config_args={"sqlalchemy.url": database_url})
 
         with self.engine.begin() as connection:
@@ -1475,7 +1475,7 @@ class DataBaseApi(StorageApi):
             return True
 
     def _apply_migrations(self, database_url: str) -> None:
-        logger.info("Applying migrations for database_url=%s", database_url)
+        logger.info("Applying database migrations")
         alembic_cfg = Config(self.DEFAULT_ALEMBIC_PATH, config_args={"sqlalchemy.url": database_url})
 
         try:
