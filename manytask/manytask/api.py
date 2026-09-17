@@ -1357,6 +1357,13 @@ def create_course_api(validated_data: CreateCourseRequest) -> ResponseReturnValu
         500: Internal server error
     """
     app: CustomFlask = current_app  # type: ignore
+    # Temporary deployment guard for unsafe upstream rollback (BSU issue #27).
+    # Existing course administration, registration and grading remain available.
+    if app.app_config.disable_course_creation:
+        return (
+            jsonify(ErrorResponse(error="Course creation is disabled on this instance").model_dump()),
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
     storage_api = app.storage_api
     rms_api = app.rms_api
 

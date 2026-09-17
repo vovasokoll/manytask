@@ -133,6 +133,8 @@ def create_app(*, debug: bool | None = None, test: bool = False) -> CustomFlask:
                 base_url=app.app_config.gitlab_url,
                 admin_token=app.app_config.gitlab_admin_token,
                 verify_ssl=app.app_config.gitlab_verify_ssl,
+                student_runner_id=app.app_config.gitlab_student_runner_id,
+                student_runner_namespace=app.app_config.gitlab_student_runner_namespace,
             )
         )
         app.auth_api = gitlab_api

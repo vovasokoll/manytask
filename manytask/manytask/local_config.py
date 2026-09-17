@@ -31,6 +31,9 @@ class LocalConfig:
     yandex_id_oauth_base: str
 
     disable_signup: bool
+    disable_course_creation: bool = False
+    gitlab_student_runner_id: int | None = None
+    gitlab_student_runner_namespace: str = ""
 
     @classmethod
     def from_env(cls) -> LocalConfig:
@@ -56,6 +59,12 @@ class LocalConfig:
             yandex_id_client_secret=os.environ.get("YANDEX_ID_CLIENT_SECRET", ""),
             yandex_id_oauth_base=os.environ.get("YANDEX_ID_OAUTH_BASE", "https://oauth.yandex.com"),
             disable_signup=os.environ.get("MANYTASK_DISABLE_SIGNUP", "false").lower() in ("true", "1", "yes"),
+            disable_course_creation=os.environ.get("MANYTASK_DISABLE_COURSE_CREATION", "false").lower()
+            in ("true", "1", "yes"),
+            gitlab_student_runner_id=int(os.environ["GITLAB_STUDENT_RUNNER_ID"])
+            if os.environ.get("GITLAB_STUDENT_RUNNER_ID")
+            else None,
+            gitlab_student_runner_namespace=os.environ.get("GITLAB_STUDENT_RUNNER_NAMESPACE", ""),
         )
 
 

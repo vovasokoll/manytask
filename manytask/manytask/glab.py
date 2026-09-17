@@ -60,6 +60,8 @@ class GitLabConfig:
     admin_token: str
     verify_ssl: bool = True
     dry_run: bool = False
+    student_runner_id: int | None = None
+    student_runner_namespace: str = ""
 
 
 class GitLabApi(RmsApi, AuthApi):
@@ -72,6 +74,10 @@ class GitLabApi(RmsApi, AuthApi):
         :param config: GitLabConfig instance containing all necessary settings
         """
         self.dry_run = config.dry_run
+        self._student_runner_id = config.student_runner_id
+        self._student_runner_namespace = config.student_runner_namespace
+        if self._student_runner_id is not None and (self._student_runner_id <= 0 or not self._student_runner_namespace):
+            raise ValueError("A dedicated student runner requires its exact students namespace")
         self._base_url = config.base_url
         self._verify_ssl = config.verify_ssl
         self._gitlab = gitlab.Gitlab(self.base_url, private_token=config.admin_token, ssl_verify=config.verify_ssl)
@@ -493,7 +499,9 @@ class GitLabApi(RmsApi, AuthApi):
             if project.path_with_namespace == gitlab_project_path:
                 logger.info("Project already exists for user=%s group=%s", rms_user.username, course_students_group)
                 project = self._gitlab.projects.get(project.id)
-                self._grant_student_access(rms_user, project, self._get_project_by_name(course_public_repo))
+                public_project = self._get_project_by_name(course_public_repo)
+                self._configure_student_project(project, public_project, course_students_group)
+                self._grant_student_access(rms_user, project, public_project)
                 return
 
         course_public_project = self._get_project_by_name(course_public_repo)
@@ -524,8 +532,59 @@ class GitLabApi(RmsApi, AuthApi):
             protected_branch.delete()
         project.save()
 
+        # Fork creation can ignore project-only attributes such as ci_config_path.
+        # Apply them with an explicit project update and verify before granting access.
+        self._configure_student_project(project, course_public_project, course_students_group)
+
         logger.info("Forked project created for user=%s repo=%s", rms_user.username, project.path_with_namespace)
         self._grant_student_access(rms_user, project, course_public_project)
+
+    def _configure_student_project(
+        self,
+        project: gitlab.v4.objects.Project,
+        public_project: gitlab.v4.objects.Project,
+        students_group: str,
+    ) -> None:
+        branch = public_project.default_branch or "main"
+        ci_path = f".gitlab-ci.yml@{public_project.path_with_namespace}:{branch}"
+        project.ci_config_path = ci_path
+        project.auto_devops_enabled = False
+        if self._student_runner_id is not None:
+            if (
+                students_group != self._student_runner_namespace
+                or project.path_with_namespace.rsplit("/", 1)[0] != students_group
+            ):
+                raise RuntimeError("Student project is outside the configured runner namespace")
+            project.shared_runners_enabled = False
+            project.group_runners_enabled = False
+        project.save()
+        project.refresh()
+        if project.ci_config_path != ci_path or project.auto_devops_enabled:
+            raise RuntimeError("GitLab did not retain trusted student CI settings")
+        if self._student_runner_id is None:
+            return
+        if project.shared_runners_enabled or project.group_runners_enabled:
+            raise RuntimeError("Student project still has non-dedicated runners enabled")
+        # Override high-privilege inherited variables before granting Developer.
+        # The dedicated host driver has its own protected credentials and never
+        # executes CI scripts or forwards job variables into student containers.
+        for key in ("GITLAB_API_TOKEN", "GITLAB_SERVICE_TOKEN", "TESTER_TOKEN", "DOCKER_AUTH_TOKEN"):
+            try:
+                variable = project.variables.get(key)
+            except GitlabGetError as error:
+                if error.response_code != 404:
+                    raise
+                project.variables.create(
+                    {"key": key, "value": "unavailable-in-student-jobs", "protected": False, "masked": False}
+                )
+            else:
+                variable.value = "unavailable-in-student-jobs"
+                variable.protected = False
+                variable.masked = False
+                variable.save()
+        runner_ids = {runner.id for runner in project.runners.list(get_all=True)}
+        if self._student_runner_id not in runner_ids:
+            project.runners.create({"runner_id": self._student_runner_id})
 
     def _grant_student_access(
         self,
