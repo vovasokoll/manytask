@@ -386,16 +386,26 @@ def create_project(course_name: str) -> ResponseReturnValue:
             base_url=app.rms_api.base_url,
         )
 
-    app.storage_api.sync_user_on_course(course.course_name, session["manytask"]["username"], is_course_admin)
-
     # Create use if needed
     try:
         app.rms_api.create_project(rms_user, course.gitlab_course_students_group, course.gitlab_course_public_repo)
         logger.info("Successfully created project for user %s in course %s", rms_user.username, course.course_name)
-    except gitlab.GitlabError as ex:
-        logger.error("Project creation failed: %s", ex.error_message)
-        return render_template(app.signup_template, error_message=ex.error_message, course_name=course.course_name)
+    except (gitlab.GitlabError, RmsApiException) as ex:
+        logger.error("Project preparation failed: %s", type(ex).__name__)
+        message = (
+            str(ex)
+            if isinstance(ex, RmsApiException)
+            else ("Could not prepare your course repository. Please try again or contact a course administrator.")
+        )
+        return render_template(
+            "create_project.html",
+            error_message=message,
+            course_name=course.course_name,
+            course_favicon=app.favicon,
+            base_url=app.rms_api.base_url,
+        )
 
+    app.storage_api.sync_user_on_course(course.course_name, session["manytask"]["username"], is_course_admin)
     return redirect(url_for("course.course_page", course_name=course_name))
 
 

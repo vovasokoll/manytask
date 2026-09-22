@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
@@ -126,13 +127,17 @@ def mock_gitlab_student_project(mock_gitlab_group_member: GroupMember) -> Projec
     """Fixture to create a mock student project."""
     project = create_mock_gitlab_project(TEST_PROJECT_ID + 1, f"{TEST_GROUP_STUDENT_NAME}/{TEST_USERNAME}")
     project.members.create = MagicMock(return_value=mock_gitlab_group_member)
+    project.members_all.get.return_value = SimpleNamespace(id=TEST_USER_ID, access_level=30)
+    project.namespace = {"id": TEST_GROUP_ID_STUDENT}
     return project
 
 
 @pytest.fixture
 def mock_gitlab_public_project() -> Project:
     """Fixture to create a mock public project."""
-    return create_mock_gitlab_project(TEST_PROJECT_ID + 2, TEST_GROUP_PUBLIC_NAME)
+    project = create_mock_gitlab_project(TEST_PROJECT_ID + 2, TEST_GROUP_PUBLIC_NAME)
+    project.members_all.get.return_value = SimpleNamespace(id=TEST_USER_ID, access_level=20)
+    return project
 
 
 @pytest.fixture
@@ -303,12 +308,13 @@ def test_create_project_existing_project(
     mock_gitlab_instance.projects.list.return_value = [mock_gitlab_student_project]
     mock_gitlab_instance.projects.get.return_value = mock_gitlab_student_project
     mock_gitlab_student_project.members.create.return_value = mock_gitlab_group_member
+    rms_api._get_group_by_name = MagicMock(return_value=SimpleNamespace(id=TEST_GROUP_ID_STUDENT))
     rms_api._get_project_by_name = MagicMock(return_value=mock_gitlab_public_project)
 
     rms_api.create_project(mock_rms_user, TEST_GROUP_STUDENT_NAME, TEST_GROUP_PUBLIC_NAME)
 
-    mock_gitlab_instance.projects.list.assert_called_with(get_all=True, search=mock_rms_user.username)
-    mock_gitlab_instance.projects.get.assert_called_with(mock_gitlab_student_project.id)
+    mock_gitlab_instance.projects.list.assert_not_called()
+    mock_gitlab_instance.projects.get.assert_called_with(f"{TEST_GROUP_STUDENT_NAME}/{mock_rms_user.username}")
     mock_gitlab_student_project.members.create.assert_called_once_with(
         {"user_id": int(mock_rms_user.id), "access_level": const.AccessLevel.DEVELOPER}
     )
@@ -319,20 +325,24 @@ def test_create_project_existing_project(
 
 
 def test_create_project_no_existing_project_creates_fork(
-    gitlab, mock_rms_user, mock_gitlab_group, mock_gitlab_student_project, mock_gitlab_fork
+    gitlab, mock_rms_user, mock_gitlab_group, mock_gitlab_student_project, mock_gitlab_public_project, mock_gitlab_fork
 ):
     rms_api, mock_gitlab_instance = gitlab
     mock_gitlab_instance.projects.list.return_value = []
     rms_api._get_group_by_name = MagicMock(return_value=mock_gitlab_group)
-    rms_api._get_project_by_name = MagicMock(return_value=mock_gitlab_student_project)
-    mock_gitlab_student_project.forks.create.return_value = mock_gitlab_fork
+    rms_api._get_project_by_name = MagicMock(return_value=mock_gitlab_public_project)
+    mock_gitlab_public_project.forks.create.return_value = mock_gitlab_fork
+    mock_gitlab_instance.projects.get.side_effect = [GitlabGetError("Not found", 404), mock_gitlab_student_project]
 
     rms_api.create_project(mock_rms_user, TEST_GROUP_STUDENT_NAME, TEST_GROUP_PUBLIC_NAME)
 
-    mock_gitlab_instance.projects.list.assert_called_with(get_all=True, search=mock_rms_user.username)
+    mock_gitlab_instance.projects.list.assert_not_called()
     rms_api._get_project_by_name.assert_called_with(TEST_GROUP_PUBLIC_NAME)
     rms_api._get_group_by_name.assert_called_with(TEST_GROUP_STUDENT_NAME)
     mock_gitlab_student_project.members.create.assert_called_once_with(
+        {"user_id": int(mock_rms_user.id), "access_level": const.AccessLevel.DEVELOPER}
+    )
+    mock_gitlab_public_project.members.create.assert_called_once_with(
         {"user_id": int(mock_rms_user.id), "access_level": const.AccessLevel.REPORTER}
     )
 

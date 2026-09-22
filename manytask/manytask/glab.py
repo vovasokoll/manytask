@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any, Optional
 
 import gitlab
@@ -28,6 +30,17 @@ def _validate_and_convert_user_id(user_id: str) -> int:
         return int(user_id)
     except ValueError:
         raise ValueError(f"GitLab user ID must be convertible to integer, got: {user_id}")
+
+
+def _matches_student_project_path(actual: str, group: str, username: str) -> bool:
+    """Allow ASCII username case differences, never a different namespace or login."""
+    namespace, _, slug = actual.rpartition("/")
+    return (
+        namespace == group
+        and re.fullmatch(r"[A-Za-z0-9_.-]+", username) is not None
+        and re.fullmatch(r"[A-Za-z0-9_.-]+", slug) is not None
+        and slug.lower() == username.lower()
+    )
 
 
 def _make_public_repo_params(project_name: str, namespace_id: int) -> dict[str, Any]:
@@ -438,7 +451,7 @@ class GitLabApi(RmsApi, AuthApi):
 
         project_path = project.path_with_namespace
         logger.debug("Found project candidate path=%s", project_path)
-        if project_path == gitlab_project_path:
+        if _matches_student_project_path(project_path, project_group, project_name):
             logger.info("Project exists project_name=%s group=%s", project_name, project_group)
             return True
 
@@ -493,23 +506,33 @@ class GitLabApi(RmsApi, AuthApi):
         gitlab_project_path = f"{course_students_group}/{rms_user.username}"
         logger.info("Gitlab project path: %s", gitlab_project_path)
 
-        for project in self._gitlab.projects.list(get_all=True, search=rms_user.username):
-            # Because of implicit conversion
-            # TODO: make global problem solve
-            if project.path_with_namespace == gitlab_project_path:
-                logger.info("Project already exists for user=%s group=%s", rms_user.username, course_students_group)
-                project = self._gitlab.projects.get(project.id)
-                public_project = self._get_project_by_name(course_public_repo)
-                self._configure_student_project(project, public_project, course_students_group)
-                self._grant_student_access(rms_user, project, public_project)
-                return
+        try:
+            project = self._gitlab.projects.get(gitlab_project_path)
+        except GitlabGetError as error:
+            if error.response_code != HTTPStatus.NOT_FOUND:
+                raise
+        else:
+            if (
+                not _matches_student_project_path(project.path_with_namespace, course_students_group, rms_user.username)
+                or project.namespace["id"] != students_group.id
+            ):
+                raise RmsApiException("Existing repository does not match this course. Contact a course administrator.")
+            # A deleted account's username can be reused. A matching slug alone
+            # must never let a new account claim the previous student's code.
+            self._require_project_access(
+                project, _validate_and_convert_user_id(rms_user.id), gitlab.const.AccessLevel.DEVELOPER
+            )
+            public_project = self._get_project_by_name(course_public_repo)
+            self._configure_student_project(project, public_project, course_students_group)
+            self._grant_student_access(rms_user, project, public_project)
+            return
 
         course_public_project = self._get_project_by_name(course_public_repo)
         logger.debug("Forking repo %s for user=%s", course_public_project.path_with_namespace, rms_user.username)
         fork = course_public_project.forks.create(
             {
                 "name": rms_user.username,
-                "path": rms_user.username,
+                "path": rms_user.username.lower(),
                 "namespace_id": students_group.id,
                 "forking_access_level": "disabled",
                 # MR target self main
@@ -572,7 +595,7 @@ class GitLabApi(RmsApi, AuthApi):
             try:
                 variable = project.variables.get(key)
             except GitlabGetError as error:
-                if error.response_code != 404:
+                if error.response_code != HTTPStatus.NOT_FOUND:
                     raise
                 project.variables.create(
                     {"key": key, "value": "unavailable-in-student-jobs", "protected": False, "masked": False}
@@ -602,12 +625,29 @@ class GitLabApi(RmsApi, AuthApi):
                 logger.info(
                     "Access %s granted on %s for user=%s", access_level, target.path_with_namespace, rms_user.username
                 )
-            except gitlab.GitlabCreateError:
+            except gitlab.GitlabCreateError as error:
+                if error.response_code != HTTPStatus.CONFLICT:
+                    raise
                 logger.warning(
                     "Access already granted or conflict on %s for user=%s",
                     target.path_with_namespace,
                     rms_user.username,
                 )
+            self._require_project_access(target, user_id, access_level)
+
+    @staticmethod
+    def _require_project_access(project: gitlab.v4.objects.Project, user_id: int, access_level: int) -> None:
+        try:
+            member = project.members_all.get(user_id)
+        except GitlabGetError as error:
+            if error.response_code != HTTPStatus.NOT_FOUND:
+                raise
+            raise RmsApiException(
+                "A repository already exists, but this account has no access. "
+                "Contact a course administrator to verify ownership and restore access."
+            ) from None
+        if member.id != user_id or member.access_level < access_level:
+            raise RmsApiException("Repository access could not be verified. Contact a course administrator.")
 
     def _construct_rms_user(
         self,
