@@ -25,7 +25,10 @@ class StudentProjectIdentityTests(unittest.TestCase):
         self.project.path_with_namespace = self.group + "/teststudent"
         self.project.members_all.get.return_value = SimpleNamespace(id=123, access_level=30)
         self.public = MagicMock()
+        self.public.visibility = "internal"
+        self.public.merge_requests_access_level = "enabled"
         self.public.members_all.get.return_value = SimpleNamespace(id=123, access_level=20)
+        self.api._gitlab.users.get.return_value = SimpleNamespace(external=False)
         self.api._gitlab.projects.get.return_value = self.project
         self.api._get_group_by_name = MagicMock(return_value=SimpleNamespace(id=7))
         self.api._get_project_by_name = MagicMock(return_value=self.public)
@@ -99,6 +102,51 @@ class StudentProjectIdentityTests(unittest.TestCase):
         self.public.members_all.get.side_effect = GitlabGetError("missing", 404)
         with self.assertRaises(RmsApiException):
             self.create()
+
+    def test_members_only_mrs_grant_guest_read_access_on_visible_repositories(self):
+        self.public.merge_requests_access_level = "private"
+        self.public.members_all.get.return_value = SimpleNamespace(id=123, access_level=10)
+        for visibility in ("public", "internal"):
+            with self.subTest(visibility=visibility):
+                self.public.visibility = visibility
+                self.public.members.create.reset_mock()
+                self.api._grant_student_access(self.user, self.project, self.public)
+                self.public.members.create.assert_called_once_with({"user_id": 123, "access_level": 10})
+                self.project.members.create.assert_called_with({"user_id": 123, "access_level": 30})
+
+    def test_other_repository_policies_keep_reporter_access(self):
+        for visibility, mr_access in (("internal", "enabled"), ("public", "enabled"), ("private", "private")):
+            with self.subTest(visibility=visibility, mr_access=mr_access):
+                self.public.visibility = visibility
+                self.public.merge_requests_access_level = mr_access
+                self.public.members.create.reset_mock()
+                self.api._grant_student_access(self.user, self.project, self.public)
+                self.public.members.create.assert_called_once_with({"user_id": 123, "access_level": 20})
+
+    def test_guest_membership_conflict_does_not_restore_reporter_on_reenrollment(self):
+        self.public.merge_requests_access_level = "private"
+        self.public.members.create.side_effect = GitlabCreateError("exists", 409)
+        self.public.members_all.get.return_value = SimpleNamespace(id=123, access_level=10)
+        self.create()
+        self.public.members.create.assert_called_once_with({"user_id": 123, "access_level": 10})
+        self.public.members.update.assert_not_called()
+
+    def test_external_user_cannot_be_enrolled_with_unreadable_internal_repository(self):
+        self.public.merge_requests_access_level = "private"
+        self.api._gitlab.users.get.return_value = SimpleNamespace(external=True)
+        with self.assertRaisesRegex(RmsApiException, "External GitLab users"):
+            self.api._grant_student_access(self.user, self.project, self.public)
+        self.project.members.create.assert_not_called()
+        self.public.members.create.assert_not_called()
+
+    def test_external_user_can_read_restricted_public_repository_as_guest(self):
+        self.public.visibility = "public"
+        self.public.merge_requests_access_level = "private"
+        self.api._gitlab.users.get.return_value = SimpleNamespace(external=True)
+        self.public.members_all.get.return_value = SimpleNamespace(id=123, access_level=10)
+        self.api._grant_student_access(self.user, self.project, self.public)
+        self.public.members.create.assert_called_once_with({"user_id": 123, "access_level": 10})
+        self.api._gitlab.users.get.assert_not_called()
 
 
 class ProjectFailurePageTests(unittest.TestCase):

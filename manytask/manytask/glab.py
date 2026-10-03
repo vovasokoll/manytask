@@ -616,9 +616,22 @@ class GitLabApi(RmsApi, AuthApi):
         course_public_project: gitlab.v4.objects.Project,
     ) -> None:
         user_id = _validate_and_convert_user_id(rms_user.id)
+        public_access_level = gitlab.const.AccessLevel.REPORTER
+        if (
+            course_public_project.visibility in ("public", "internal")
+            and course_public_project.merge_requests_access_level == "private"
+        ):
+            # GitLab's members-only MRs require Reporter, but Guests can still
+            # read public/internal assignments. Do not reopen MRs at enrollment.
+            if course_public_project.visibility == "internal" and self._gitlab.users.get(user_id).external:
+                raise RmsApiException(
+                    "External GitLab users cannot read an internal course repository as Guests. "
+                    "Contact a course administrator."
+                )
+            public_access_level = gitlab.const.AccessLevel.GUEST
         for target, access_level in (
             (project, gitlab.const.AccessLevel.DEVELOPER),
-            (course_public_project, gitlab.const.AccessLevel.REPORTER),
+            (course_public_project, public_access_level),
         ):
             try:
                 target.members.create({"user_id": user_id, "access_level": access_level})
